@@ -1,0 +1,137 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// Bayesian Normal-Inverse-Gamma Conjugate Probability Bands
+// Posterior predictive Student-t distribution on log-returns
+// Bands mapped: close * exp(quantiles)
+
+//@version=5
+indicator("Bayesian NIG Probability Bands", overlay=true, max_lines_count=500)
+
+// ── Inputs ──────────────────────────────────────────────────────────────────
+grp_bay = "Bayesian Parameters"
+lookback = input.int(50, "Lookback window", minval=5, maxval=1000, group=grp_bay)
+mu0      = input.float(0.0,   "Prior mu0",    step=0.001,  group=grp_bay)
+kappa0   = input.float(1.0,   "Prior kappa0", minval=0.001, step=0.1, group=grp_bay)
+alpha0   = input.float(2.0,   "Prior alpha0", minval=1.001, step=0.5, group=grp_bay)
+beta0    = input.float(0.001, "Prior beta0",  minval=1e-6,  step=0.0001, group=grp_bay)
+
+grp_disp = "Display"
+show_68 = input.bool(true, "68% band", group=grp_disp)
+show_95 = input.bool(true, "95% band", group=grp_disp)
+show_99 = input.bool(true, "99% band", group=grp_disp)
+col_68  = input.color(color.new(#2196F3, 70), "68% color", group=grp_disp)
+col_95  = input.color(color.new(#FF9800, 80), "95% color", group=grp_disp)
+col_99  = input.color(color.new(#F44336, 85), "99% color", group=grp_disp)
+
+// ── Log-returns ─────────────────────────────────────────────────────────────
+lr = close[1] > 0 ? math.log(close / close[1]) : 0.0
+
+// ── Rolling sufficient statistics ───────────────────────────────────────────
+enough_bars = bar_index >= lookback
+
+var float x_bar  = na
+var float sum_sq = na
+
+if enough_bars
+    s = 0.0
+    for i = 0 to lookback - 1
+        s += lr[i]
+    x_bar := s / lookback
+    ss = 0.0
+    for i = 0 to lookback - 1
+        d = lr[i] - x_bar
+        ss += d * d
+    sum_sq := ss
+
+// ── Posterior hyperparameters (NIG conjugate update) ────────────────────────
+float kappa_n = na
+float mu_n    = na
+float alpha_n = na
+float beta_n  = na
+
+if enough_bars
+    n_f     = float(lookback)
+    kappa_n := kappa0 + n_f
+    mu_n    := (kappa0 * mu0 + n_f * x_bar) / kappa_n
+    alpha_n := alpha0 + n_f / 2.0
+    beta_n  := beta0 + 0.5 * sum_sq + 0.5 * kappa0 * n_f * math.pow(x_bar - mu0, 2) / kappa_n
+
+// ── Predictive Student-t parameters ────────────────────────────────────────
+// X_new ~ t(2*alpha_n, mu_n, beta_n*(kappa_n+1)/(alpha_n*kappa_n))
+float df    = na
+float loc   = na
+float scale = na
+
+if enough_bars
+    df    := 2.0 * alpha_n
+    loc   := mu_n
+    scale := math.sqrt(beta_n * (kappa_n + 1.0) / (alpha_n * kappa_n))
+
+// ── Student-t quantile (Cornish-Fisher expansion from normal quantile) ─────
+// t_p ≈ z + g1(z)/v + g2(z)/v²
+// g1(z) = (z³ + z) / 4
+// g2(z) = (5z⁵ + 16z³ + 3z) / 96
+student_t_q(float z, float v) =>
+    z2 = z * z
+    z3 = z2 * z
+    z5 = z2 * z3
+    g1 = (z3 + z) / 4.0
+    g2 = (5.0 * z5 + 16.0 * z3 + 3.0 * z) / 96.0
+    z + g1 / v + g2 / (v * v)
+
+// Normal quantiles: 68% → z=1.0, 95% → z=1.96, 99% → z=2.576
+float t68 = na
+float t95 = na
+float t99 = na
+
+if enough_bars
+    t68 := student_t_q(1.0,   df)
+    t95 := student_t_q(1.96,  df)
+    t99 := student_t_q(2.576, df)
+
+// ── Price bands: close * exp(loc ± t * scale) ──────────────────────────────
+float u68 = na
+float l68 = na
+float u95 = na
+float l95 = na
+float u99 = na
+float l99 = na
+
+if enough_bars
+    u68 := close * math.exp(loc + t68 * scale)
+    l68 := close * math.exp(loc - t68 * scale)
+    u95 := close * math.exp(loc + t95 * scale)
+    l95 := close * math.exp(loc - t95 * scale)
+    u99 := close * math.exp(loc + t99 * scale)
+    l99 := close * math.exp(loc - t99 * scale)
+
+// ── Plots & fills ──────────────────────────────────────────────────────────
+p_u99 = plot(show_99 ? u99 : na, "99% Upper", color=col_99, linewidth=1)
+p_l99 = plot(show_99 ? l99 : na, "99% Lower", color=col_99, linewidth=1)
+p_u95 = plot(show_95 ? u95 : na, "95% Upper", color=col_95, linewidth=1)
+p_l95 = plot(show_95 ? l95 : na, "95% Lower", color=col_95, linewidth=1)
+p_u68 = plot(show_68 ? u68 : na, "68% Upper", color=col_68, linewidth=1)
+p_l68 = plot(show_68 ? l68 : na, "68% Lower", color=col_68, linewidth=1)
+
+fill(p_u99, p_l99, color=col_99, title="Fill 99%")
+fill(p_u95, p_l95, color=col_95, title="Fill 95%")
+fill(p_u68, p_l68, color=col_68, title="Fill 68%")
+
+// ── Info table ──────────────────────────────────────────────────────────────
+grp_tbl = "Info Table"
+show_tbl = input.bool(true, "Show posterior info", group=grp_tbl)
+
+if show_tbl and barstate.islast and enough_bars
+    var table tbl = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80), border_color=color.new(color.gray, 60), border_width=1)
+    table.cell(tbl, 0, 0, "Posterior",     text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, "",              text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 1, "mu_n",          text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(mu_n, "#.######"), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 2, "kappa_n",       text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(kappa_n, "#.##"),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 3, "alpha_n",       text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(alpha_n, "#.##"),  text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 4, "df (2*alpha_n)",text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(df, "#.##"),       text_color=color.white, text_size=size.small)
+    table.cell(tbl, 0, 5, "scale",         text_color=color.gray,  text_size=size.small)
+    table.cell(tbl, 1, 5, str.tostring(scale, "#.######"),text_color=color.white, text_size=size.small)
